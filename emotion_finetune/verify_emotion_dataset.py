@@ -7,7 +7,10 @@ Checks (against the ACTUAL training code, not just file existence):
   shapes      motion [T,32] float32 | audio [T,768] float32 |
               smirk pose_params/cam [T,3] | gaze [T,2] float32
   alignment   all modalities share the same T per sample
-  length      T >= wav2vec_sec*fps + num_prev_frames (34 for the 0.96s live contract)
+  length      T >= wav2vec_sec*fps + num_prev_frames (34 for the 0.96s live contract).
+              Shorter samples are SKIPPED (a warning, not a failure) - the
+              training dataset class skips them too.  Only a suspiciously large
+              short fraction (> --max_short_fraction) is treated as a failure.
   labels      every stem parses to one of the 5 emotions; per-emotion counts
   values      finite tensors, plausible ranges
   separability per-emotion motion-latent statistics + nearest-centroid accuracy
@@ -97,6 +100,7 @@ def check_samples(dirs: dict, args) -> list[dict]:
           f"fps={args.fps}, num_prev_frames={args.num_prev_frames})")
 
     records = []
+    short_samples: list[tuple[str, int]] = []
     checked = 0
     for stem in motion_stems:
         info = parse_mead_stem(stem)
@@ -141,10 +145,10 @@ def check_samples(dirs: dict, args) -> list[dict]:
                     problems.append(f"gaze shape {gaze.shape} != ({T},2)")
             else:
                 problems.append("gaze file missing")
-            if T < required_len:
-                problems.append(f"T={T} < required_len={required_len}")
             if problems:
                 fail(f"{stem}: " + "; ".join(problems))
+            elif T < required_len:
+                short_samples.append((stem, T))
             else:
                 records.append({"stem": stem, "emotion": info["emotion"], "T": T})
             checked += 1
@@ -152,8 +156,23 @@ def check_samples(dirs: dict, args) -> list[dict]:
                 break
         except Exception as exc:
             fail(f"{stem}: load error {exc}")
+    if short_samples:
+        fraction = len(short_samples) / max(1, len(motion_stems))
+        examples = ", ".join(f"{s}(T={t})" for s, t in short_samples[:5])
+        warn(
+            f"{len(short_samples)} samples are shorter than required_len={required_len} "
+            f"and will be SKIPPED during training (e.g. {examples}). "
+            "These are naturally short clips; the training dataset class skips them automatically."
+        )
+        if fraction > float(args.max_short_fraction):
+            fail(
+                f"{fraction:.1%} of samples are too short (< {required_len} frames) -- "
+                "this looks like a systematic problem (wrong fps? truncated preprocessing?), "
+                "not a few short clips"
+            )
     if records:
-        ok(f"{len(records)} samples passed all shape/dtype/alignment checks")
+        ok(f"{len(records)} samples passed all shape/dtype/alignment checks "
+           f"({len(short_samples)} short samples skipped)")
     return records
 
 def check_labels(records: list[dict]) -> None:
@@ -309,6 +328,8 @@ def main() -> None:
     parser.add_argument("--conditioning_mode", choices=("live", "full"), default="live")
     parser.add_argument("--require_smirk_gaze", type=int, default=1)
     parser.add_argument("--max_check", type=int, default=100000)
+    parser.add_argument("--max_short_fraction", type=float, default=0.5,
+                        help="fail if more than this fraction of samples are too short (systematic problem)")
     parser.add_argument("--separability_samples", type=int, default=250)
     parser.add_argument("--recompute_check", type=int, default=0)
     parser.add_argument("--raw_audio_dir", default="")
