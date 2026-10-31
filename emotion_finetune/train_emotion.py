@@ -315,7 +315,10 @@ def emotion_training_losses(fm, batch, args, autocast_ctx):
             per_sample = lambda a, b: (a - b).abs().mean(dim=(1, 2))
             d_right = per_sample(pred.float(), gt_flow.float())
             d_wrong = per_sample(pred_wrong.float(), gt_flow.float())
-            hinge = F.relu(d_wrong - d_right + float(args.margin))
+            # Correct direction: penalise when the WRONG emotion fits nearly as
+            # well as the correct one (d_wrong - d_right < margin).  The loss
+            # decreases toward 0 as the model learns to use the conditioning.
+            hinge = F.relu(float(args.margin) - (d_wrong - d_right))
             margin_loss = hinge[~same].mean()
 
     clear_emotion(fm)

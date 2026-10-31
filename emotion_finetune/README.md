@@ -14,12 +14,19 @@ c = t_embedder(t) + c_embedder(a + pose + cam + gaze)
 ```
 
 In the live PersonaPlex pipeline `pose`/`cam`/`gaze` are exact zeros, so the
-live conditioning is audio-only. This package adds a fifth additive term:
+live conditioning is audio-only. This package adds the emotion as a **peer of
+the timestep embedding**, in the FMT's hidden (512-dim) conditioning space:
 
 ```
-c = t_embedder(t) + c_embedder(a + pose + cam + gaze + emotion)
-emotion = EmotionProjection(one_hot_5)        # Linear(5 -> 32, bias=False), zero-init
+c = t_embedder(t) + c_embedder(a + pose + cam + gaze) + emotion
+emotion = EmotionProjection(one_hot_5)        # Linear(5 -> 512, bias=False), zero-init
 ```
+
+Injecting into the hidden space (the same mechanism DiT uses for class
+labels) gives the emotion a direct, full-strength pathway into every block's
+adaLN modulation. (An earlier version injected into the 32-dim sum *before*
+the frozen `c_embedder`, which attenuated the emotion and let the model
+ignore it -- do not use adapters trained with that version.)
 
 * **Zero-init, bias-free emotion projection** - an all-zero (neutral) emotion
   vector contributes exactly zero, forever (even after training). The

@@ -8,13 +8,19 @@ The IMTalker FlowMatchingTransformer (FMT) conditions every block through
 
 where a/pose/cam/gaze are per-frame dim_c (32) conditioning terms.  In the
 live PersonaPlex pipeline pose/cam/gaze are exact zeros, so the live
-conditioning is audio-only.  This module adds a fifth additive term:
+conditioning is audio-only.  This module adds the emotion as a peer of the
+timestep embedding, in the FMT's hidden (dim_h) conditioning space:
 
-    c = t_embedder(t) + c_embedder(a + pose + cam + gaze + emotion)
+    c = t_embedder(t) + c_embedder(a + pose + cam + gaze) + emotion
 
 with
 
-    emotion = emotion_projection(one_hot_5)      # Linear(5 -> 32, bias=False)
+    emotion = emotion_projection(one_hot_5)      # Linear(5 -> 512, bias=False)
+
+Injecting into the hidden space (the same mechanism DiT uses for class
+labels) gives the emotion a direct, full-strength pathway into every block's
+adaLN modulation, instead of being compressed through the frozen 32-dim
+c_embedder bottleneck.
 
 Properties (all verified by emotion_finetune/sanity_check.py):
 
@@ -104,18 +110,25 @@ def emotion_to_vector(emotion, scale: float = 1.0, emotions: list[str] | None = 
 # ---------------------------------------------------------------------------
 
 class EmotionProjection(nn.Module):
-    """Linear(emotion_dim -> dim_c, bias=False) with zero-initialized weight.
+    """Linear(emotion_dim -> dim_h, bias=False) with zero-initialized weight.
+
+    The emotion is injected into the FMT's hidden (dim_h) conditioning space,
+    added alongside the timestep embedding -- the same mechanism DiT uses for
+    class labels.  This gives the emotion a direct, full-strength pathway into
+    every block's adaLN modulation instead of being compressed through the
+    frozen 32-dim c_embedder bottleneck (which was only trained to map
+    audio/pose/cam/gaze and attenuates the unfamiliar emotion direction).
 
     bias=False is deliberate: with an all-zero input the output is exactly
     zero regardless of the trained weight, so "neutral" can never drift away
     from the original model through this pathway.
     """
 
-    def __init__(self, emotion_dim: int = 5, dim_c: int = 32):
+    def __init__(self, emotion_dim: int = 5, dim_h: int = 512):
         super().__init__()
         self.emotion_dim = int(emotion_dim)
-        self.dim_c = int(dim_c)
-        self.proj = nn.Linear(self.emotion_dim, self.dim_c, bias=False)
+        self.dim_h = int(dim_h)
+        self.proj = nn.Linear(self.emotion_dim, self.dim_h, bias=False)
         nn.init.zeros_(self.proj.weight)
 
     def forward(self, emotion: torch.Tensor) -> torch.Tensor:
@@ -285,12 +298,13 @@ def emotion_fmt_forward(
     # Calculate RoPE
     rotary_pos_emb = self.rotary_emb(x, seq_len=x.shape[1])
 
-    cond = a + pose + cam + gaze
+    c = self.c_embedder(a + pose + cam + gaze)
+    c = t + c
+    # Emotion is injected into the hidden (dim_h) conditioning space, as a
+    # peer of the timestep embedding, NOT through the frozen 32-dim c_embedder.
     emotion_cond = getattr(self, "current_emotion_cond", None)
     if emotion_cond is not None:
-        cond = cond + emotion_cond
-    c = self.c_embedder(cond)
-    c = t + c
+        c = c + emotion_cond
 
     for block in self.blocks:
         x = block(x, c, rotary_pos_emb=rotary_pos_emb)
@@ -381,14 +395,18 @@ def save_emotion_adapter(
     lora_sd = emotion_lora_state_dict(fm)
     if override_params:
         for key, value in override_params.items():
-            if key in proj_sd:
-                proj_sd[key] = value.detach().cpu()
+            # proj_sd keys are relative ("proj.weight") while EMA keys are
+            # full ("emotion_projection.proj.weight") -- strip the prefix.
+            if key.startswith("emotion_projection."):
+                rel = key[len("emotion_projection."):]
+                if rel in proj_sd:
+                    proj_sd[rel] = value.detach().cpu()
             if key in lora_sd:
                 lora_sd[key] = value.detach().cpu()
     config = {
         "format": "imtalker_emotion_adapter_v1",
         "emotion_dim": int(fm.emotion_projection.emotion_dim),
-        "dim_c": int(fm.opt.dim_c),
+        "dim_h": int(fm.opt.dim_h),
         "emotions": list(getattr(fm, "_emotion_names", EMOTIONS)),
         "lora_rank": int(getattr(fm, "_emotion_lora_rank", 0)),
         "lora_alpha": float(getattr(fm, "_emotion_lora_alpha", 0.0)),
@@ -415,6 +433,12 @@ def load_emotion_adapter(fm: nn.Module, path) -> dict:
     if expected_dim != int(fm.emotion_projection.emotion_dim):
         raise RuntimeError(
             f"adapter emotion_dim={expected_dim} but model has {fm.emotion_projection.emotion_dim}"
+        )
+    expected_dim_h = int(config.get("dim_h", fm.emotion_projection.dim_h))
+    if expected_dim_h != int(fm.emotion_projection.dim_h):
+        raise RuntimeError(
+            f"adapter dim_h={expected_dim_h} but model has {fm.emotion_projection.dim_h} "
+            "(old 32-dim adapters are incompatible with the 512-dim injection)"
         )
     model_sd = fm.state_dict()
     loaded, skipped = 0, []
@@ -487,7 +511,7 @@ def upgrade_fm_with_emotion(
     fm.fmt.current_emotion_cond = None
 
     # 2) zero-init emotion projection (trainable)
-    fm.emotion_projection = EmotionProjection(emotion_dim, int(fm.opt.dim_c))
+    fm.emotion_projection = EmotionProjection(emotion_dim, int(fm.opt.dim_h))
 
     # 3) emotion LoRA on the FMT blocks + decoder (trainable A/B)
     targets = apply_emotion_lora_to_model(fm, rank=lora_rank, alpha=lora_alpha, dropout=lora_dropout)

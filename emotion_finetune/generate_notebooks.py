@@ -63,11 +63,12 @@ audio-driven lip synchronization.
 The IMTalker FlowMatchingTransformer conditions every block through
 `c = t + c_embedder(a + pose + cam + gaze)`. In the live PersonaPlex pipeline
 pose/cam/gaze are exact zeros, so the live conditioning is audio-only. This
-adds a fifth additive term:
+adds the emotion as a peer of the timestep embedding, in the hidden (512-dim)
+conditioning space (the same mechanism DiT uses for class labels):
 
 ```
-c = t + c_embedder(a + pose + cam + gaze + emotion)
-emotion = EmotionProjection(one_hot_5)     # Linear(5 -> 32, bias=False), zero-init
+c = t + c_embedder(a + pose + cam + gaze) + emotion
+emotion = EmotionProjection(one_hot_5)     # Linear(5 -> 512, bias=False), zero-init
 ```
 
 * **Zero-init, bias-free emotion projection** - an all-zero (neutral) emotion
