@@ -36,7 +36,7 @@ from torchvision import transforms as T
 
 _THIS_DIR = Path(__file__).resolve().parent
 _REPO_ROOT = _THIS_DIR.parent
-for _p in (str(_REPO_ROOT), str(_REPO_ROOT / "IMTalker")):
+for _p in (str(_REPO_ROOT), str(_REPO_ROOT / "IMTalker"), str(_REPO_ROOT / "IMTalker" / "generator")):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
