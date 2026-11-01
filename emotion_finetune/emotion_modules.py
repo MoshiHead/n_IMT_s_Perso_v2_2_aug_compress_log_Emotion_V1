@@ -321,6 +321,96 @@ def _require_upgraded(fm: nn.Module) -> None:
         raise RuntimeError("FMGenerator has not been upgraded; call upgrade_fm_with_emotion() first")
 
 
+def emotion_forward_with_cfg(
+    self,
+    t,
+    x,
+    a,
+    prev_x,
+    prev_a,
+    ref_x,
+    gaze,
+    prev_gaze,
+    pose,
+    prev_pose,
+    cam,
+    prev_cam,
+    a_cfg_scale: float = 1.0,
+    **kwargs,
+) -> torch.Tensor:
+    """CFG with a dedicated, output-space emotion guidance term.
+
+    The stock ``forward_with_cfg`` broadcasts a single emotion vector to BOTH
+    guidance branches, which (a) puts the emotion into the null-audio
+    unconditional branch the model never saw in training, and (b) forces any
+    amplification to scale the *input* embedding, which quickly goes
+    out-of-distribution (super-linear distortion).
+
+    Here every evaluation stays in-distribution and the emotion is amplified in
+    *velocity* space instead:
+
+        v = v00 + a_cfg * (v10 - v00) + e_cfg * (v11 - v10)
+
+    with  v00 = FMT(null_audio, neutral), v10 = FMT(audio, neutral) and
+    v11 = FMT(audio, emotion).  ``e_cfg`` (``_emotion_cfg_scale``) is therefore
+    an exactly-linear, always-in-distribution emotion strength: 1.0 reproduces
+    the trained emotion, larger values strengthen it cleanly.  With no active
+    emotion this reduces to the stock path (bit-identical).
+    """
+    original = getattr(self, "_original_forward_with_cfg", None)
+    emotion_cond = getattr(self, "current_emotion_cond", None)
+    e_cfg = float(getattr(self, "_emotion_cfg_scale", 1.0))
+    if original is None or emotion_cond is None:
+        return original(
+            t=t, x=x, a=a, prev_x=prev_x, prev_a=prev_a, ref_x=ref_x,
+            gaze=gaze, prev_gaze=prev_gaze, pose=pose, prev_pose=prev_pose,
+            cam=cam, prev_cam=prev_cam, a_cfg_scale=a_cfg_scale, **kwargs,
+        )
+
+    saved = self.current_emotion_cond
+    try:
+        # neutral reference velocity v10 = FMT(audio, neutral)
+        self.current_emotion_cond = None
+        v10 = self.forward(
+            t=t, x=x, a=a, prev_x=prev_x, prev_a=prev_a, ref_x=ref_x,
+            gaze=gaze, prev_gaze=prev_gaze, pose=pose, prev_pose=prev_pose,
+            cam=cam, prev_cam=prev_cam, train=False,
+        )
+        # emotional velocity v11 = FMT(audio, emotion)
+        self.current_emotion_cond = saved
+        v11 = self.forward(
+            t=t, x=x, a=a, prev_x=prev_x, prev_a=prev_a, ref_x=ref_x,
+            gaze=gaze, prev_gaze=prev_gaze, pose=pose, prev_pose=prev_pose,
+            cam=cam, prev_cam=prev_cam, train=False,
+        )
+        if a_cfg_scale != 1.0:
+            # audio CFG base v00 + a_cfg*(v10 - v00); v00 = FMT(null_audio, neutral)
+            self.current_emotion_cond = None
+            null_a = torch.zeros_like(a)
+            v00 = self.forward(
+                t=t, x=x, a=null_a, prev_x=prev_x, prev_a=prev_a, ref_x=ref_x,
+                gaze=gaze, prev_gaze=prev_gaze, pose=pose, prev_pose=prev_pose,
+                cam=cam, prev_cam=prev_cam, train=False,
+            )
+            base = v00 + a_cfg_scale * (v10 - v00)
+        else:
+            base = v10
+    finally:
+        self.current_emotion_cond = saved
+
+    return base + e_cfg * (v11 - v10)
+
+
+def set_emotion_guidance(fm: nn.Module, scale: float) -> None:
+    """Set the output-space emotion guidance strength (e_cfg).
+
+    1.0 reproduces the trained emotion; >1 amplifies it in velocity space
+    (clean, in-distribution) instead of scaling the input embedding.
+    """
+    _require_upgraded(fm)
+    fm.fmt._emotion_cfg_scale = float(scale)
+
+
 def set_emotion(fm: nn.Module, emotion, scale: float = 1.0) -> torch.Tensor:
     """Project an emotion (name or [5]/[B,5] tensor) and store it on the FMT.
 
@@ -350,6 +440,7 @@ def clear_emotion(fm: nn.Module) -> None:
     """Remove the emotion conditioning (exact original behavior)."""
     _require_upgraded(fm)
     fm.fmt.current_emotion_cond = None
+    fm.fmt._emotion_cfg_scale = 1.0
 
 
 def set_emotion_lora_enabled(fm: nn.Module, enabled: bool) -> int:
@@ -513,9 +604,12 @@ def upgrade_fm_with_emotion(
     for param in fm.parameters():
         param.requires_grad_(False)
 
-    # 1) patch the FMT forward (instance-level; the class stays untouched)
+    # 1) patch the FMT forward + CFG (instance-level; the class stays untouched)
+    fm.fmt._original_forward_with_cfg = fm.fmt.forward_with_cfg
     fm.fmt.forward = types.MethodType(emotion_fmt_forward, fm.fmt)
+    fm.fmt.forward_with_cfg = types.MethodType(emotion_forward_with_cfg, fm.fmt)
     fm.fmt.current_emotion_cond = None
+    fm.fmt._emotion_cfg_scale = 1.0
 
     # 2) zero-init emotion projection (trainable)
     fm.emotion_projection = EmotionProjection(emotion_dim, int(fm.opt.dim_h))

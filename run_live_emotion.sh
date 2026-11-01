@@ -9,7 +9,9 @@ set -euo pipefail
 # Emotion configuration (environment):
 #   EMOTION_ADAPTER_PATH   trained emotion adapter checkpoint (required for emotion)
 #   AVATAR_EMOTION         neutral | happy | sad | angry | surprise | fear (default: neutral)
-#   EMOTION_SCALE          emotion intensity multiplier (default: 1.0)
+#   EMOTION_SCALE          input-embedding scale; KEEP AT 1.0 (>1 distorts). Default: 1.0
+#   EMOTION_GUIDANCE       output-space emotion strength (default: 1.0); use 1.5-3 for a
+#                          stronger, still-natural expression (recommended amplifier)
 #   EMOTION_LORA_RANK      adapter training rank (default: 16)
 #   EMOTION_LORA_ALPHA     adapter training alpha (default: 32)
 #
@@ -72,13 +74,14 @@ fi
 EMOTION_ADAPTER_PATH="${EMOTION_ADAPTER_PATH:-}"
 AVATAR_EMOTION="${AVATAR_EMOTION:-neutral}"
 EMOTION_SCALE="${EMOTION_SCALE:-1.0}"
+EMOTION_GUIDANCE="${EMOTION_GUIDANCE:-1.0}"
 EMOTION_LORA_RANK="${EMOTION_LORA_RANK:-16}"
 EMOTION_LORA_ALPHA="${EMOTION_LORA_ALPHA:-32}"
 if [[ -n "$EMOTION_ADAPTER_PATH" && ! -e "$EMOTION_ADAPTER_PATH" ]]; then
   echo "Missing emotion adapter: $EMOTION_ADAPTER_PATH" >&2
   exit 1
 fi
-export EMOTION_ADAPTER_PATH AVATAR_EMOTION EMOTION_SCALE EMOTION_LORA_RANK EMOTION_LORA_ALPHA
+export EMOTION_ADAPTER_PATH AVATAR_EMOTION EMOTION_SCALE EMOTION_GUIDANCE EMOTION_LORA_RANK EMOTION_LORA_ALPHA
 # STT + query routing + web search -- opt-in, additive. ENABLE_SEARCH=0
 # (default) reproduces the plain conversational launch command with zero new
 # flags appended. ENABLE_RAG is still honored as a legacy alias.
@@ -187,7 +190,7 @@ DUMP_DIR="${DUMP_DIR:-$IMTALKER_DIR/live_dumps_emotion_${PORT}_varm3}"
 echo "Starting EMOTION AH on port $PORT, physical GPU $CUDA_VISIBLE_DEVICES"
 echo "Voice: $VOICE_PROMPT | CFG: $A_CFG_SCALE | NFE: $NFE"
 if [[ -n "$EMOTION_ADAPTER_PATH" ]]; then
-  echo "Emotion: adapter=$EMOTION_ADAPTER_PATH avatar_emotion=$AVATAR_EMOTION scale=$EMOTION_SCALE"
+  echo "Emotion: adapter=$EMOTION_ADAPTER_PATH avatar_emotion=$AVATAR_EMOTION scale=$EMOTION_SCALE guidance=$EMOTION_GUIDANCE"
 else
   echo "Emotion: disabled (stock AH behavior)"
 fi

@@ -42,6 +42,7 @@ from emotion_finetune.emotion_modules import (
     clean_generator_state,
     clear_emotion,
     set_emotion,
+    set_emotion_guidance,
     upgrade_fm_with_emotion,
 )
 from emotion_finetune.evaluate_emotion_model import build_opt, load_ref_x
@@ -70,11 +71,12 @@ def load_fm(args):
 
 
 @torch.no_grad()
-def gen_motion(fm, a_feat, ref_x, args, emotion, scale):
+def gen_motion(fm, a_feat, ref_x, args, emotion, guidance):
     if emotion is None:
         clear_emotion(fm)
     else:
-        set_emotion(fm, emotion, scale=scale)
+        set_emotion(fm, emotion, scale=1.0)
+        set_emotion_guidance(fm, guidance)
     data = {"a_feat": a_feat.unsqueeze(0), "ref_x": ref_x}
     motion = fm.sample(data, a_cfg_scale=float(args.a_cfg_scale), nfe=int(args.nfe), seed=int(args.seed))
     clear_emotion(fm)
@@ -98,7 +100,8 @@ def main() -> None:
     parser.add_argument("--nfe", type=int, default=5)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--num_samples", type=int, default=4)
-    parser.add_argument("--scales", default="1,2,4,8")
+    parser.add_argument("--scales", default="1,1.5,2,2.5,3",
+                        help="emotion_guidance values to sweep (output-space, in-distribution)")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     args = parser.parse_args()
 
@@ -120,7 +123,7 @@ def main() -> None:
     print("=" * 74)
     print("EMOTION EFFECT MAGNITUDE (L2 distance of generated motion from neutral)")
     print("=" * 74)
-    header = "sample".ljust(28) + "emotion".ljust(10) + "".join(f"x{s:g}".rjust(10) for s in scales)
+    header = "sample".ljust(28) + "emotion".ljust(10) + "".join(f"g{s:g}".rjust(10) for s in scales)
     print(header)
     print("-" * len(header))
 
@@ -151,12 +154,13 @@ def main() -> None:
     print("=" * 74)
     base = np.array([r[1][0] for r in all_rows]).mean()
     big = np.array([r[1][-1] for r in all_rows]).mean()
-    print(f"mean distance at scale={scales[0]:g}: {base:.3f}   at scale={scales[-1]:g}: {big:.3f}")
+    print(f"mean distance at guidance={scales[0]:g}: {base:.3f}   at guidance={scales[-1]:g}: {big:.3f}")
     if base < 0.5:
-        print("-> the scale=1 effect is SMALL (sub-visible). Increase --emotion_scale")
-        print("   at inference, or retrain with --emotion_cond_scale for a native stronger signal.")
-    if big > 2 * base:
-        print("-> the effect GROWS with scale, so the direction is correct and amplification works.")
+        print("-> the guidance=1 effect is SMALL (sub-visible). Amplify with --emotion_guidance")
+        print("   (output-space, in-distribution) at inference, or retrain with --emotion_cond_scale.")
+    if big > 1.5 * base:
+        print("-> the effect GROWS ~linearly with guidance (in-distribution), so guidance amplification")
+        print("   strengthens the expression WITHOUT the out-of-distribution distortion of emotion_scale.")
     print("=" * 74)
 
 

@@ -163,11 +163,12 @@ SEED = 42
 # --- Preview / evaluation -----------------------------------------------------
 TEST_REF = ""              # default: {PROJECT_ROOT}/IMTalker/assets/3robert.jpeg
 TEST_AUDIO = ""            # a .wav to render the preview with (any speech)
-TEST_EMOTION_SCALE = 1.0   # extra inference-time intensity (try 2-4 for a quick
-                           # no-retrain amplification of a too-subtle adapter)
-TEST_EMOTION_SCALES = "1,2,3"  # strength sweep: renders each emotion at every listed
-                               # scale into scale_<s>/ subfolders so you can pick the
-                               # strongest NATURAL look. Set to "" to use only TEST_EMOTION_SCALE.
+TEST_EMOTION_GUIDANCE = 1.0  # single output-space strength (used only if the sweep below is "")
+TEST_EMOTION_GUIDANCES = "1,1.5,2,2.5,3"  # strength sweep: renders each emotion at every
+                               # listed guidance into guidance_<g>/ subfolders so you can pick
+                               # the strongest NATURAL look. Guidance amplifies the emotion in
+                               # velocity space (exactly linear, in-distribution), so it does NOT
+                               # distort the way scaling the input embedding did.
 EVAL_NUM_SAMPLES = 24
 
 EXPECTED_TORCH_VERSION = "2.8.0+cu128"
@@ -636,12 +637,21 @@ Run these on `emotion_adapter_latest.ckpt` (any time during training) or
 **If the emotions are visible but too subtle** (the common case): the model has
 faithfully learned the *intensity present in the training data* (robot `level_1`
 expressions are mild), and the flow-matching loss cannot reward stronger-than-data
-expressions. The fix is to **amplify the (correct) learned direction at inference** -
-because the emotion enters the conditioning linearly, `emotion_scale` extrapolates
-the expression naturally. The preview cell already sweeps `TEST_EMOTION_SCALES =
-"1,2,3"`; pick the strongest scale that still looks natural and use it as
-`EMOTION_SCALE` in the live notebook. The optional diagnostic below quantifies the
-effect size at each scale.
+expressions. The fix is to **amplify the learned direction at inference** - but the
+mechanism matters:
+
+* Do **NOT** raise `emotion_scale` (the input-embedding scale). The measurement shows
+  it grows *super-linearly* and explodes (8 -> 290), which is exactly the distortion /
+  rotating-face / broken-lip-sync failure. Keep `emotion_scale = 1.0`.
+* **DO** raise `emotion_guidance` (the output-space strength). It extrapolates the
+  *velocity* difference between the emotional and neutral pass, so every forward pass
+  stays at the trained (in-distribution) magnitude and the effect grows **exactly
+  linearly** - a strong expression that stays natural and keeps lip-sync.
+
+The preview cell already sweeps `TEST_EMOTION_GUIDANCES = "1,1.5,2,2.5,3"`; pick the
+strongest guidance that still looks natural and set it as `EMOTION_GUIDANCE` in the
+live notebook. The optional diagnostic below quantifies the effect size at each
+guidance value.
 """
 
 
@@ -665,8 +675,8 @@ run(
     f"--base_lora_path {BASE_LORA_PATH} "
     f"--emotion_adapter_path {ADAPTER} "
     f"--emotion_lora_rank {EMOTION_LORA_RANK} --emotion_lora_alpha {EMOTION_LORA_ALPHA} "
-    + (f"--emotion_scales {TEST_EMOTION_SCALES} " if str(TEST_EMOTION_SCALES).strip()
-       else f"--emotion_scale {TEST_EMOTION_SCALE} ")
+    + (f"--emotion_guidances {TEST_EMOTION_GUIDANCES} " if str(TEST_EMOTION_GUIDANCES).strip()
+       else f"--emotion_guidance {TEST_EMOTION_GUIDANCE} ")
     f"--out_dir {PREVIEW_OUT} --name robot --crop --device cuda",
     cwd=PROJECT_ROOT,
 )
@@ -699,8 +709,8 @@ run(
 """
 
 TRAIN_MEASURE_CODE = """# OPTIONAL diagnostic: measure how much the emotion conditioning moves the
-# generated motion latent at several emotion_scale values.  Run this when the
-# preview looks neutral to decide between a higher inference scale vs a retrain.
+# generated motion latent at several emotion_guidance values.  Guidance grows the
+# effect ~linearly and in-distribution (no distortion), unlike the input scale.
 from pathlib import Path
 
 ADAPTER = f"{EXP_DIR}/emotion_adapter_final.ckpt"
@@ -717,7 +727,7 @@ run(
     f"--base_lora_path {BASE_LORA_PATH} "
     f"--emotion_adapter_path {ADAPTER} "
     f"--emotion_lora_rank {EMOTION_LORA_RANK} --emotion_lora_alpha {EMOTION_LORA_ALPHA} "
-    f"--wav2vec_sec {WAV2VEC_SEC} --num_samples 4 --scales 1,2,4,8 --device cuda",
+    f"--wav2vec_sec {WAV2VEC_SEC} --num_samples 4 --scales 1,1.5,2,2.5,3 --device cuda",
     cwd=PROJECT_ROOT,
 )
 """
@@ -830,8 +840,9 @@ PUBLIC_URL = f"https://{RUNPOD_POD_ID}-{PORT}.proxy.runpod.net/" if RUNPOD_POD_I
 EMOTION_ADAPTER_PATH = ""          # e.g. f"{PROJECT_ROOT}/checkpoints/emotion_adapter_final.ckpt"
 EMOTION_ADAPTER_HF = ""            # e.g. "your-hf-user/imtalker-emotion:emotion_adapter_final.ckpt"
 AVATAR_EMOTION = "neutral"         # neutral | happy | sad | angry | surprise | fear
-EMOTION_SCALE = "1.0"              # emotion intensity multiplier; if the expression is
-                                   # too subtle try "2" or "4" (no retrain needed)
+EMOTION_GUIDANCE = "2.0"           # output-space emotion strength; if the expression is too
+                                   # subtle raise this (1.5-3). Exactly linear + in-distribution,
+                                   # so it stays natural. (Do NOT use the input scale - it distorts.)
 EMOTION_LORA_RANK = "16"           # must match the adapter's training rank
 EMOTION_LORA_ALPHA = "32"          # must match the adapter's training alpha
 
@@ -878,7 +889,7 @@ os.makedirs("/workspace", exist_ok=True)
 print("Parameters loaded.")
 print(f"PROJECT_ROOT = {PROJECT_ROOT}")
 print(f"HOST:PORT    = {HOST}:{PORT}")
-print(f"AVATAR_EMOTION = {AVATAR_EMOTION}  (scale={EMOTION_SCALE})")
+print(f"AVATAR_EMOTION = {AVATAR_EMOTION}  (guidance={EMOTION_GUIDANCE})")
 print(f"EMOTION_ADAPTER_PATH = {EMOTION_ADAPTER_PATH or EMOTION_ADAPTER_HF or '(none - stock neutral server)'}")
 if PUBLIC_URL:
     print(f"PUBLIC_URL = {PUBLIC_URL}")
@@ -1000,7 +1011,7 @@ if EMOTION_ADAPTER_PATH:
         raise RuntimeError(f"emotion adapter not found: {EMOTION_ADAPTER_PATH}")
     size_mb = os.path.getsize(EMOTION_ADAPTER_PATH) / 1e6
     print(f"[ok] emotion adapter: {EMOTION_ADAPTER_PATH} ({size_mb:.1f} MB)")
-    print(f"     avatar emotion: {AVATAR_EMOTION} (scale={EMOTION_SCALE})")
+    print(f"     avatar emotion: {AVATAR_EMOTION} (guidance={EMOTION_GUIDANCE})")
 else:
     if AVATAR_EMOTION.lower() not in ("neutral", "none", ""):
         print(f"[warn] AVATAR_EMOTION={AVATAR_EMOTION} but no adapter configured - "
@@ -1015,7 +1026,7 @@ server through the emotion wrapper). The emotion is read from the environment:
 
 * `EMOTION_ADAPTER_PATH` - trained adapter (empty = stock neutral server)
 * `AVATAR_EMOTION` - constant expression for the whole conversation
-* `EMOTION_SCALE` - intensity multiplier
+* `EMOTION_GUIDANCE` - output-space strength (1.5-3 for stronger, natural expressions)
 """
 
 INFER_LAUNCH_CODE = """env_overrides = {
@@ -1026,7 +1037,7 @@ INFER_LAUNCH_CODE = """env_overrides = {
     "PROJECT_ROOT": PROJECT_ROOT,
     "EMOTION_ADAPTER_PATH": EMOTION_ADAPTER_PATH,
     "AVATAR_EMOTION": AVATAR_EMOTION,
-    "EMOTION_SCALE": str(EMOTION_SCALE),
+    "EMOTION_GUIDANCE": str(EMOTION_GUIDANCE),
     "EMOTION_LORA_RANK": str(EMOTION_LORA_RANK),
     "EMOTION_LORA_ALPHA": str(EMOTION_LORA_ALPHA),
 }

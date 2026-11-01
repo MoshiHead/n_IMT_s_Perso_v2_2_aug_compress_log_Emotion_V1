@@ -11,7 +11,11 @@ Configuration is via environment variables (no CLI changes needed):
                          Empty  -> server behaves exactly like the stock AH server.
   AVATAR_EMOTION         neutral | happy | sad | angry | surprise | fear
                          (constant emotion for the whole conversation)
-  EMOTION_SCALE          intensity multiplier for the emotion vector (default 1.0)
+  EMOTION_SCALE          input-embedding scale; KEEP AT 1.0 (the trained magnitude).
+                         >1 drives the model out-of-distribution and distorts the face.
+  EMOTION_GUIDANCE       output-space emotion strength (default 1.0). The recommended
+                         way to get a stronger expression: exactly linear, always
+                         in-distribution, so it stays natural at 1.5-3.
   EMOTION_LORA_RANK      must match the adapter's training rank (default 16)
   EMOTION_LORA_ALPHA     must match the adapter's training alpha (default 32)
 
@@ -51,11 +55,15 @@ def main() -> None:
         adapter_path = os.environ.get("EMOTION_ADAPTER_PATH", "").strip()
         emotion_name = os.environ.get("AVATAR_EMOTION", "neutral").strip() or "neutral"
         emotion_scale = float(os.environ.get("EMOTION_SCALE", "1.0") or "1.0")
+        emotion_guidance = float(os.environ.get("EMOTION_GUIDANCE", "1.0") or "1.0")
         lora_rank = int(os.environ.get("EMOTION_LORA_RANK", "16") or "16")
         lora_alpha = float(os.environ.get("EMOTION_LORA_ALPHA", "32") or "32")
 
         if adapter_path:
-            from emotion_finetune.emotion_modules import upgrade_fm_with_emotion
+            from emotion_finetune.emotion_modules import (
+                set_emotion_guidance,
+                upgrade_fm_with_emotion,
+            )
 
             summary = upgrade_fm_with_emotion(
                 fm,
@@ -65,10 +73,13 @@ def main() -> None:
                 lora_rank=lora_rank,
                 lora_alpha=lora_alpha,
             )
+            # clean output-space amplification (in-distribution, exactly linear)
+            if emotion_guidance != 1.0 and summary["active_emotion"] != "neutral":
+                set_emotion_guidance(fm, emotion_guidance)
             print(
                 f"[emotion] live emotion enabled: adapter={adapter_path} "
                 f"avatar_emotion={summary['active_emotion']} scale={emotion_scale} "
-                f"targets={summary['targets']} rank={lora_rank}",
+                f"guidance={emotion_guidance} targets={summary['targets']} rank={lora_rank}",
                 flush=True,
             )
         elif emotion_name.lower() not in ("", "neutral", "none"):

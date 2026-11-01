@@ -148,9 +148,16 @@ be visible** on the rendered face even though training metrics look correct
 - `--emotion_emb_lr_mult` (training, default 1.0): trains the small emotion
   embedding with a higher LR than the LoRA (e.g. `10`), so it reaches a usable
   magnitude faster.
-- `--emotion_scale` / `EMOTION_SCALE` (inference, default 1.0): an extra
-  on-the-fly multiplier, no retrain needed. Good for a quick check of whether
-  an already-trained adapter learned the right direction.
+- `--emotion_guidance` / `EMOTION_GUIDANCE` (inference, default 1.0): the
+  **recommended** amplifier. It extrapolates the *output velocity* difference
+  between the emotional and neutral forward passes, so both passes stay at the
+  trained (in-distribution) magnitude and the effect grows **exactly linearly**.
+  No retrain needed; stays natural and keeps lip-sync at 1.5-3.
+- `--emotion_scale` / `EMOTION_SCALE` (inference, default 1.0): the
+  input-embedding multiplier. **Keep at 1.0** - values >1 drive the model
+  out-of-distribution (the response is *super-linear* and explodes), producing
+  the distorted / rotating-face / broken-lip-sync failure. Do not use it to
+  amplify.
 
 ## Troubleshooting: emotions visible but too subtle
 
@@ -158,18 +165,28 @@ This is the expected outcome when the training data's expressions are mild
 (e.g. MEAD `level_1`). The model learns the data's intensity faithfully, and the
 flow-matching loss **cannot reward stronger-than-data expressions** - so no
 training setting will push past it. The fix is to **amplify the learned emotion
-direction at inference**. Because the emotion enters the conditioning linearly
-(`c += emotion_projection(one_hot)`, and adaLN is linear in `c`), scaling it
-extrapolates the expression naturally (equivalent to emotion CFG here):
+direction at inference** - but the mechanism matters.
+
+**Do not** raise `emotion_scale`. Although the emotion enters the conditioning
+additively, the pathway is only linear near the training point; scaling the input
+embedding quickly goes out-of-distribution (measured effect: `8 -> 33 -> 64 ->
+290` for scales `1,2,4,8`), which is exactly the distorted-face / rotating /
+broken-lip-sync failure.
+
+**Do** raise `emotion_guidance`. It is an *emotion classifier-free-guidance*
+term: `v = v_audio_cfg + guidance * (v_emotion - v_neutral)`, computed from two
+in-distribution forward passes. It is exactly linear and never goes OOD:
 
 ```bash
-# sweep several strengths in one run; pick the strongest natural-looking scale
-python emotion_finetune/preview_emotion.py ... --emotion_scales 1,2,3
-# then use the chosen scale live, e.g. EMOTION_SCALE=2 bash run_live_emotion.sh
+# sweep several strengths in one run; pick the strongest natural-looking guidance
+python emotion_finetune/preview_emotion.py ... --emotion_guidances 1,1.5,2,2.5,3
+# then use the chosen guidance live, e.g. EMOTION_GUIDANCE=2 bash run_live_emotion.sh
 ```
 
-Start around 2; increase until the expression is strong but before it distorts
-(usually 2-4). The same `EMOTION_SCALE` env var applies to the live server.
+Start around 1.5-2; increase until the expression is strong but still natural
+(typically up to ~3). The same `EMOTION_GUIDANCE` env var applies to the live
+server. Neutral is always preserved exactly (the guidance term is zero when no
+emotion is set).
 
 ## Troubleshooting: preview videos all look neutral
 
@@ -186,14 +203,14 @@ non-trivial weights, but the rendered emotions are invisible:
        --ref_path IMTalker/assets/3robert.jpeg \
        --base_lora_path checkpoints/live_winner/lora/ditto_blink_lora_withaudio_r64_096_continue_2h_last.ckpt \
        --emotion_adapter_path exps/emotion_lora_v1/emotion_adapter_final.ckpt \
-       --num_samples 4 --scales 1,2,4,8
+       --num_samples 4 --scales 1,1.5,2,2.5,3
    ```
 
-   If the L2 distance from neutral is tiny at scale 1 but grows with scale, the
-   model learned the right **direction** and only the **magnitude** is small.
+   If the L2 distance from neutral is tiny at guidance 1 but grows ~linearly with
+   guidance, the model learned the right **direction** and only the **magnitude** is small.
 
-2. **Quick confirmation**: re-render the preview with `--emotion_scale 2` (then
-   4). If emotions appear, the adapter is fine - it just needs amplification.
+2. **Quick confirmation**: re-render the preview with `--emotion_guidance 2` (then
+   3). If emotions appear, the adapter is fine - it just needs amplification.
 
 3. **Robust fix**: retrain from a fresh `--exp_name` with
    `--emotion_cond_scale 4 --emotion_emb_lr_mult 10` (the RunPod notebook

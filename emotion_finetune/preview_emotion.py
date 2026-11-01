@@ -37,6 +37,7 @@ from emotion_finetune.emotion_modules import (
     clean_generator_state,
     clear_emotion,
     set_emotion,
+    set_emotion_guidance,
     upgrade_fm_with_emotion,
 )
 
@@ -130,7 +131,7 @@ def load_agent(args):
     return agent
 
 
-def render_all(agent, args, scale: float, out_dir: Path) -> list[tuple[str, str]]:
+def render_all(agent, args, guidance: float, out_dir: Path) -> list[tuple[str, str]]:
     out_dir.mkdir(parents=True, exist_ok=True)
     renders: list[tuple[str, str]] = []
     settings = ["neutral"] + list(EMOTIONS)
@@ -139,9 +140,12 @@ def render_all(agent, args, scale: float, out_dir: Path) -> list[tuple[str, str]
             if getattr(agent.fm, "_emotion_upgraded", False):
                 clear_emotion(agent.fm)
         else:
-            set_emotion(agent.fm, setting, scale=float(scale))
+            # emotion_scale stays at the trained magnitude (1.0); amplification
+            # is done in velocity space via emotion_guidance (clean, in-distribution).
+            set_emotion(agent.fm, setting, scale=float(args.emotion_scale))
+            set_emotion_guidance(agent.fm, guidance)
         out_path = out_dir / f"{args.name}_{setting}.mp4"
-        print(f"[preview] rendering {setting} (scale={scale:g}) -> {out_path}", flush=True)
+        print(f"[preview] rendering {setting} (guidance={guidance:g}) -> {out_path}", flush=True)
         agent.run_inference(
             str(out_path), args.ref_path, args.aud_path,
             pose_path=None, gaze_path=None,
@@ -196,11 +200,18 @@ def parse_args(argv=None):
     p.add_argument("--emotion_adapter_path", default="")
     p.add_argument("--emotion_lora_rank", type=int, default=16)
     p.add_argument("--emotion_lora_alpha", type=float, default=32.0)
-    p.add_argument("--emotion_scale", type=float, default=1.0)
-    p.add_argument("--emotion_scales", default="",
-                   help="comma-separated strength sweep (e.g. '1,2,3'); overrides --emotion_scale. "
-                        "Because the emotion enters the conditioning linearly, scale extrapolates the "
-                        "learned expression beyond the (subtle) training intensity while staying natural.")
+    p.add_argument("--emotion_scale", type=float, default=1.0,
+                   help="input-embedding scale. KEEP AT 1.0 (the trained magnitude); values >1 drive "
+                        "the model out-of-distribution and distort the face. Use --emotion_guidance "
+                        "to strengthen the expression instead.")
+    p.add_argument("--emotion_guidance", type=float, default=1.0,
+                   help="output-space (velocity) emotion guidance strength. 1.0 = trained emotion, "
+                        ">1 amplifies it cleanly (exactly linear, in-distribution). This is the "
+                        "recommended way to get a stronger expression.")
+    p.add_argument("--emotion_guidances", default="",
+                   help="comma-separated guidance sweep (e.g. '1,1.5,2,2.5,3'); overrides "
+                        "--emotion_guidance and renders each emotion at every strength so you can "
+                        "pick the strongest natural look.")
     p.add_argument("--out_dir", required=True)
     p.add_argument("--name", default="preview")
     p.add_argument("--wav2vec_sec", type=float, default=0.96)
@@ -216,19 +227,19 @@ def parse_args(argv=None):
 def main() -> None:
     args = parse_args()
     agent = load_agent(args)
-    if str(args.emotion_scales).strip():
-        scales = [float(s) for s in str(args.emotion_scales).split(",") if s.strip()]
+    if str(args.emotion_guidances).strip():
+        guidances = [float(s) for s in str(args.emotion_guidances).split(",") if s.strip()]
     else:
-        scales = [float(args.emotion_scale)]
-    multi = len(scales) > 1
-    for scale in scales:
-        sub = Path(args.out_dir) / (f"scale_{scale:g}" if multi else "")
-        renders = render_all(agent, args, scale, sub)
+        guidances = [float(args.emotion_guidance)]
+    multi = len(guidances) > 1
+    for guidance in guidances:
+        sub = Path(args.out_dir) / (f"guidance_{guidance:g}" if multi else "")
+        renders = render_all(agent, args, guidance, sub)
         if not args.no_comparison:
-            suffix = f"_scale{scale:g}" if multi else ""
+            suffix = f"_guidance{guidance:g}" if multi else ""
             comparison = str(Path(args.out_dir) / f"{args.name}_comparison{suffix}.mp4")
             write_comparison(renders, comparison)
-            print(f"[preview] comparison video (scale={scale:g}): {comparison}", flush=True)
+            print(f"[preview] comparison video (guidance={guidance:g}): {comparison}", flush=True)
     print("[preview] done", flush=True)
 
 
