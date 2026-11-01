@@ -130,8 +130,7 @@ def load_agent(args):
     return agent
 
 
-def render_all(agent, args) -> list[tuple[str, str]]:
-    out_dir = Path(args.out_dir)
+def render_all(agent, args, scale: float, out_dir: Path) -> list[tuple[str, str]]:
     out_dir.mkdir(parents=True, exist_ok=True)
     renders: list[tuple[str, str]] = []
     settings = ["neutral"] + list(EMOTIONS)
@@ -140,9 +139,9 @@ def render_all(agent, args) -> list[tuple[str, str]]:
             if getattr(agent.fm, "_emotion_upgraded", False):
                 clear_emotion(agent.fm)
         else:
-            set_emotion(agent.fm, setting, scale=float(args.emotion_scale))
+            set_emotion(agent.fm, setting, scale=float(scale))
         out_path = out_dir / f"{args.name}_{setting}.mp4"
-        print(f"[preview] rendering {setting} -> {out_path}", flush=True)
+        print(f"[preview] rendering {setting} (scale={scale:g}) -> {out_path}", flush=True)
         agent.run_inference(
             str(out_path), args.ref_path, args.aud_path,
             pose_path=None, gaze_path=None,
@@ -198,6 +197,10 @@ def parse_args(argv=None):
     p.add_argument("--emotion_lora_rank", type=int, default=16)
     p.add_argument("--emotion_lora_alpha", type=float, default=32.0)
     p.add_argument("--emotion_scale", type=float, default=1.0)
+    p.add_argument("--emotion_scales", default="",
+                   help="comma-separated strength sweep (e.g. '1,2,3'); overrides --emotion_scale. "
+                        "Because the emotion enters the conditioning linearly, scale extrapolates the "
+                        "learned expression beyond the (subtle) training intensity while staying natural.")
     p.add_argument("--out_dir", required=True)
     p.add_argument("--name", default="preview")
     p.add_argument("--wav2vec_sec", type=float, default=0.96)
@@ -213,11 +216,19 @@ def parse_args(argv=None):
 def main() -> None:
     args = parse_args()
     agent = load_agent(args)
-    renders = render_all(agent, args)
-    if not args.no_comparison:
-        comparison = str(Path(args.out_dir) / f"{args.name}_comparison.mp4")
-        write_comparison(renders, comparison)
-        print(f"[preview] comparison video: {comparison}", flush=True)
+    if str(args.emotion_scales).strip():
+        scales = [float(s) for s in str(args.emotion_scales).split(",") if s.strip()]
+    else:
+        scales = [float(args.emotion_scale)]
+    multi = len(scales) > 1
+    for scale in scales:
+        sub = Path(args.out_dir) / (f"scale_{scale:g}" if multi else "")
+        renders = render_all(agent, args, scale, sub)
+        if not args.no_comparison:
+            suffix = f"_scale{scale:g}" if multi else ""
+            comparison = str(Path(args.out_dir) / f"{args.name}_comparison{suffix}.mp4")
+            write_comparison(renders, comparison)
+            print(f"[preview] comparison video (scale={scale:g}): {comparison}", flush=True)
     print("[preview] done", flush=True)
 
 

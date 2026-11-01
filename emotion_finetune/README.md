@@ -152,6 +152,25 @@ be visible** on the rendered face even though training metrics look correct
   on-the-fly multiplier, no retrain needed. Good for a quick check of whether
   an already-trained adapter learned the right direction.
 
+## Troubleshooting: emotions visible but too subtle
+
+This is the expected outcome when the training data's expressions are mild
+(e.g. MEAD `level_1`). The model learns the data's intensity faithfully, and the
+flow-matching loss **cannot reward stronger-than-data expressions** - so no
+training setting will push past it. The fix is to **amplify the learned emotion
+direction at inference**. Because the emotion enters the conditioning linearly
+(`c += emotion_projection(one_hot)`, and adaLN is linear in `c`), scaling it
+extrapolates the expression naturally (equivalent to emotion CFG here):
+
+```bash
+# sweep several strengths in one run; pick the strongest natural-looking scale
+python emotion_finetune/preview_emotion.py ... --emotion_scales 1,2,3
+# then use the chosen scale live, e.g. EMOTION_SCALE=2 bash run_live_emotion.sh
+```
+
+Start around 2; increase until the expression is strong but before it distorts
+(usually 2-4). The same `EMOTION_SCALE` env var applies to the live server.
+
 ## Troubleshooting: preview videos all look neutral
 
 If training converged (margin ~0) and `check_adapter.py` reports distinct,

@@ -165,6 +165,9 @@ TEST_REF = ""              # default: {PROJECT_ROOT}/IMTalker/assets/3robert.jpe
 TEST_AUDIO = ""            # a .wav to render the preview with (any speech)
 TEST_EMOTION_SCALE = 1.0   # extra inference-time intensity (try 2-4 for a quick
                            # no-retrain amplification of a too-subtle adapter)
+TEST_EMOTION_SCALES = "1,2,3"  # strength sweep: renders each emotion at every listed
+                               # scale into scale_<s>/ subfolders so you can pick the
+                               # strongest NATURAL look. Set to "" to use only TEST_EMOTION_SCALE.
 EVAL_NUM_SAMPLES = 24
 
 EXPECTED_TORCH_VERSION = "2.8.0+cu128"
@@ -627,16 +630,18 @@ temporal stability.
 Run these on `emotion_adapter_latest.ckpt` (any time during training) or
 `emotion_adapter_final.ckpt` (after training).
 
-**If the preview videos all look neutral**, the emotion signal is probably too
-weak (sub-visible). Two options:
+**If the preview videos all look neutral**, retrain with `EMOTION_COND_SCALE = 4.0`
+(the default) so the signal is strong enough to converge, then re-run.
 
-1. Quick test without retraining: set `TEST_EMOTION_SCALE = 2` (or 4) in the
-   Parameters cell and re-run the preview. If emotions appear, the direction
-   was learned correctly and only the magnitude was small.
-2. Robust fix: retrain with `EMOTION_COND_SCALE = 4.0` (already the default in
-   the Parameters cell) so the model learns a natively stronger emotion signal.
-   The optional diagnostic cell below measures the effect size at several
-   scales before you decide.
+**If the emotions are visible but too subtle** (the common case): the model has
+faithfully learned the *intensity present in the training data* (robot `level_1`
+expressions are mild), and the flow-matching loss cannot reward stronger-than-data
+expressions. The fix is to **amplify the (correct) learned direction at inference** -
+because the emotion enters the conditioning linearly, `emotion_scale` extrapolates
+the expression naturally. The preview cell already sweeps `TEST_EMOTION_SCALES =
+"1,2,3"`; pick the strongest scale that still looks natural and use it as
+`EMOTION_SCALE` in the live notebook. The optional diagnostic below quantifies the
+effect size at each scale.
 """
 
 
@@ -660,7 +665,8 @@ run(
     f"--base_lora_path {BASE_LORA_PATH} "
     f"--emotion_adapter_path {ADAPTER} "
     f"--emotion_lora_rank {EMOTION_LORA_RANK} --emotion_lora_alpha {EMOTION_LORA_ALPHA} "
-    f"--emotion_scale {TEST_EMOTION_SCALE} "
+    + (f"--emotion_scales {TEST_EMOTION_SCALES} " if str(TEST_EMOTION_SCALES).strip()
+       else f"--emotion_scale {TEST_EMOTION_SCALE} ")
     f"--out_dir {PREVIEW_OUT} --name robot --crop --device cuda",
     cwd=PROJECT_ROOT,
 )
