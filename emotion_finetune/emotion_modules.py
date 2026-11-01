@@ -333,6 +333,11 @@ def set_emotion(fm: nn.Module, emotion, scale: float = 1.0) -> torch.Tensor:
     weight = fm.emotion_projection.proj.weight
     vec = vec.to(device=weight.device, dtype=weight.dtype)
     cond = fm.emotion_projection(vec)
+    # emotion_cond_scale strengthens the (otherwise sub-visible) emotion signal
+    # consistently between training and inference; stored in the adapter config.
+    cond_scale = float(getattr(fm, "_emotion_cond_scale", 1.0))
+    if cond_scale != 1.0:
+        cond = cond * cond_scale
     if cond.ndim == 1:
         cond = cond.view(1, 1, -1)
     else:
@@ -410,6 +415,7 @@ def save_emotion_adapter(
         "emotions": list(getattr(fm, "_emotion_names", EMOTIONS)),
         "lora_rank": int(getattr(fm, "_emotion_lora_rank", 0)),
         "lora_alpha": float(getattr(fm, "_emotion_lora_alpha", 0.0)),
+        "emotion_cond_scale": float(getattr(fm, "_emotion_cond_scale", 1.0)),
         "base": "IMTalker FMGenerator (+ optional frozen with-audio LoRA)",
     }
     if config_extra:
@@ -486,6 +492,7 @@ def upgrade_fm_with_emotion(
     adapter_path=None,
     emotion_name: str = NEUTRAL,
     emotion_scale: float = 1.0,
+    emotion_cond_scale: float = 1.0,
     verbose: bool = True,
 ) -> dict:
     """Turn a stock FMGenerator into an emotion-conditioned generator.
@@ -520,6 +527,7 @@ def upgrade_fm_with_emotion(
     fm._emotion_names = emotions
     fm._emotion_lora_rank = int(lora_rank)
     fm._emotion_lora_alpha = float(lora_alpha)
+    fm._emotion_cond_scale = float(emotion_cond_scale)
 
     # move the freshly created modules onto the model's device
     device = next(fm.parameters()).device
@@ -529,10 +537,13 @@ def upgrade_fm_with_emotion(
             module.emotion_lora_A.to(device)
             module.emotion_lora_B.to(device)
 
-    # 4) optional trained adapter
+    # 4) optional trained adapter (its config may override the cond scale)
     load_info = None
     if adapter_path:
         load_info = load_emotion_adapter(fm, adapter_path)
+        cfg_scale = (load_info.get("config") or {}).get("emotion_cond_scale")
+        if cfg_scale is not None:
+            fm._emotion_cond_scale = float(cfg_scale)
 
     # 5) optional constant emotion
     active = NEUTRAL

@@ -135,6 +135,10 @@ EXP_NAME = "emotion_lora_v1"
 EMOTIONS = "happy,sad,angry,surprise,fear"
 EMOTION_LORA_RANK = 16
 EMOTION_LORA_ALPHA = 32.0
+# Strengthen the emotion signal so the learned expression is VISIBLE (the default
+# 1.0 learns the right direction but at a sub-visible magnitude on the motion latent).
+EMOTION_COND_SCALE = 4.0     # multiplier on the emotion embedding (baked into the adapter)
+EMOTION_EMB_LR_MULT = 10.0   # faster LR for the small emotion embedding vs the LoRA
 
 BATCH_SIZE = 16
 LR = 1e-4
@@ -159,6 +163,8 @@ SEED = 42
 # --- Preview / evaluation -----------------------------------------------------
 TEST_REF = ""              # default: {PROJECT_ROOT}/IMTalker/assets/3robert.jpeg
 TEST_AUDIO = ""            # a .wav to render the preview with (any speech)
+TEST_EMOTION_SCALE = 1.0   # extra inference-time intensity (try 2-4 for a quick
+                           # no-retrain amplification of a too-subtle adapter)
 EVAL_NUM_SAMPLES = 24
 
 EXPECTED_TORCH_VERSION = "2.8.0+cu128"
@@ -321,6 +327,8 @@ REQUIRED_STRUCTURE = [
     "emotion_finetune/sanity_check.py",
     "emotion_finetune/preview_emotion.py",
     "emotion_finetune/evaluate_emotion_model.py",
+    "emotion_finetune/measure_emotion_effect.py",
+    "emotion_finetune/check_adapter.py",
 ]
 missing = [p for p in REQUIRED_STRUCTURE if not os.path.exists(os.path.join(PROJECT_ROOT, p))]
 if missing:
@@ -537,6 +545,7 @@ common_args = (
     f"--exp_root {EXP_ROOT} --exp_name {EXP_NAME} "
     f"--emotions {EMOTIONS} "
     f"--emotion_lora_rank {EMOTION_LORA_RANK} --emotion_lora_alpha {EMOTION_LORA_ALPHA} "
+    f"--emotion_cond_scale {EMOTION_COND_SCALE} --emotion_emb_lr_mult {EMOTION_EMB_LR_MULT} "
     f"--wav2vec_sec {WAV2VEC_SEC} --conditioning_mode {CONDITIONING_MODE} "
     f"--require_smirk_gaze {REQUIRE_SMIRK_GAZE} "
     f"--batch_size {BATCH_SIZE} --lr {LR} --weight_decay {WEIGHT_DECAY} "
@@ -617,7 +626,19 @@ temporal stability.
 
 Run these on `emotion_adapter_latest.ckpt` (any time during training) or
 `emotion_adapter_final.ckpt` (after training).
+
+**If the preview videos all look neutral**, the emotion signal is probably too
+weak (sub-visible). Two options:
+
+1. Quick test without retraining: set `TEST_EMOTION_SCALE = 2` (or 4) in the
+   Parameters cell and re-run the preview. If emotions appear, the direction
+   was learned correctly and only the magnitude was small.
+2. Robust fix: retrain with `EMOTION_COND_SCALE = 4.0` (already the default in
+   the Parameters cell) so the model learns a natively stronger emotion signal.
+   The optional diagnostic cell below measures the effect size at several
+   scales before you decide.
 """
+
 
 TRAIN_PREVIEW_CODE = """# Render the 6-way preview video (neutral + happy + sad + angry + surprise + fear).
 from pathlib import Path
@@ -639,6 +660,7 @@ run(
     f"--base_lora_path {BASE_LORA_PATH} "
     f"--emotion_adapter_path {ADAPTER} "
     f"--emotion_lora_rank {EMOTION_LORA_RANK} --emotion_lora_alpha {EMOTION_LORA_ALPHA} "
+    f"--emotion_scale {TEST_EMOTION_SCALE} "
     f"--out_dir {PREVIEW_OUT} --name robot --crop --device cuda",
     cwd=PROJECT_ROOT,
 )
@@ -666,6 +688,30 @@ run(
     f"--wav2vec_sec {WAV2VEC_SEC} "
     f"--num_samples {EVAL_NUM_SAMPLES} --val_fraction {VAL_FRACTION} "
     f"--out_json {EXP_DIR}/eval_report.json --device cuda",
+    cwd=PROJECT_ROOT,
+)
+"""
+
+TRAIN_MEASURE_CODE = """# OPTIONAL diagnostic: measure how much the emotion conditioning moves the
+# generated motion latent at several emotion_scale values.  Run this when the
+# preview looks neutral to decide between a higher inference scale vs a retrain.
+from pathlib import Path
+
+ADAPTER = f"{EXP_DIR}/emotion_adapter_final.ckpt"
+if not Path(ADAPTER).exists():
+    ADAPTER = f"{EXP_DIR}/emotion_adapter_latest.ckpt"
+if not TEST_REF:
+    TEST_REF = f"{IMTALKER_DIR}/assets/3robert.jpeg"
+
+run(
+    f"{VENV_ACTIVATE} && python {EMOTION_DIR}/measure_emotion_effect.py "
+    f"--dataset_path {DATASET_DIR} "
+    f"--generator_path {GENERATOR_PATH} --renderer_path {RENDERER_PATH} "
+    f"--ref_path {TEST_REF} "
+    f"--base_lora_path {BASE_LORA_PATH} "
+    f"--emotion_adapter_path {ADAPTER} "
+    f"--emotion_lora_rank {EMOTION_LORA_RANK} --emotion_lora_alpha {EMOTION_LORA_ALPHA} "
+    f"--wav2vec_sec {WAV2VEC_SEC} --num_samples 4 --scales 1,2,4,8 --device cuda",
     cwd=PROJECT_ROOT,
 )
 """
@@ -720,6 +766,7 @@ def build_training_notebook() -> list[dict]:
         md(TRAIN_PREVIEW_MD),
         code(TRAIN_PREVIEW_CODE),
         code(TRAIN_EVAL_CODE),
+        code(TRAIN_MEASURE_CODE),
         md(TRAIN_NEXT_MD),
     ]
 
@@ -777,7 +824,8 @@ PUBLIC_URL = f"https://{RUNPOD_POD_ID}-{PORT}.proxy.runpod.net/" if RUNPOD_POD_I
 EMOTION_ADAPTER_PATH = ""          # e.g. f"{PROJECT_ROOT}/checkpoints/emotion_adapter_final.ckpt"
 EMOTION_ADAPTER_HF = ""            # e.g. "your-hf-user/imtalker-emotion:emotion_adapter_final.ckpt"
 AVATAR_EMOTION = "neutral"         # neutral | happy | sad | angry | surprise | fear
-EMOTION_SCALE = "1.0"              # emotion intensity multiplier
+EMOTION_SCALE = "1.0"              # emotion intensity multiplier; if the expression is
+                                   # too subtle try "2" or "4" (no retrain needed)
 EMOTION_LORA_RANK = "16"           # must match the adapter's training rank
 EMOTION_LORA_ALPHA = "32"          # must match the adapter's training alpha
 

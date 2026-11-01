@@ -66,6 +66,13 @@ def parse_args(argv=None):
     p.add_argument("--emotion_lora_rank", type=int, default=16)
     p.add_argument("--emotion_lora_alpha", type=float, default=32.0)
     p.add_argument("--emotion_lora_dropout", type=float, default=0.0)
+    p.add_argument("--emotion_cond_scale", type=float, default=1.0,
+                   help="multiplier on the emotion embedding during training (and baked into the "
+                        "adapter config for inference). Use >1 (e.g. 4) when the learned emotion "
+                        "effect is too subtle to see.")
+    p.add_argument("--emotion_emb_lr_mult", type=float, default=1.0,
+                   help="learning-rate multiplier for the emotion embedding vs the LoRA "
+                        "(e.g. 5-10 helps the small embedding reach a visible magnitude faster)")
     # data
     p.add_argument("--wav2vec_sec", type=float, default=0.96)
     p.add_argument("--num_prev_frames", type=int, default=10)
@@ -383,7 +390,12 @@ def load_training_checkpoint(fm, optimizer, scaler, ema, path, device):
                 model_sd[key].copy_(value.to(device))
                 loaded += 1
     if optimizer is not None and payload.get("optimizer") is not None:
-        optimizer.load_state_dict(payload["optimizer"])
+        try:
+            optimizer.load_state_dict(payload["optimizer"])
+        except ValueError as exc:
+            # e.g. checkpoints saved before the separate embedding param group
+            # was introduced: keep the loaded weights/EMA, restart the optimizer.
+            print(f"[resume] optimizer state not compatible ({exc}); starting optimizer fresh", flush=True)
     if scaler is not None and payload.get("scaler") is not None:
         scaler.load_state_dict(payload["scaler"])
     if ema is not None and payload.get("ema") is not None:
@@ -464,6 +476,7 @@ def main() -> None:
         lora_rank=int(args.emotion_lora_rank),
         lora_alpha=float(args.emotion_lora_alpha),
         lora_dropout=float(args.emotion_lora_dropout),
+        emotion_cond_scale=float(args.emotion_cond_scale),
         verbose=is_main(rank),
     )
     fm.eval()
@@ -525,7 +538,17 @@ def main() -> None:
 
     # ---- optimization --------------------------------------------------------
     trainable = emotion_trainable_parameters(fm)
-    optimizer = torch.optim.AdamW(trainable, lr=float(args.lr), weight_decay=float(args.weight_decay))
+    # Separate, faster LR for the small emotion embedding so it can reach a
+    # visible magnitude; the LoRA keeps the base LR.
+    emb_params = list(fm.emotion_projection.parameters())
+    emb_ids = set(id(p) for p in emb_params)
+    lora_params = [p for p in trainable if id(p) not in emb_ids]
+    param_groups = [
+        {"params": lora_params, "lr": float(args.lr)},
+        {"params": emb_params, "lr": float(args.lr) * float(args.emotion_emb_lr_mult)},
+    ]
+    optimizer = torch.optim.AdamW(param_groups, lr=float(args.lr), weight_decay=float(args.weight_decay))
+    group_base_lrs = [float(g["lr"]) for g in optimizer.param_groups]
 
     steps_per_epoch = max(1, len(train_loader))
     total_steps = steps_per_epoch * int(args.max_epochs)
@@ -598,8 +621,9 @@ def main() -> None:
                 stop_training = True
                 break
             lr = lr_at_step(global_step, total_steps, float(args.lr), int(args.warmup_steps), float(args.min_lr_ratio))
-            for group in optimizer.param_groups:
-                group["lr"] = lr
+            schedule_factor = lr / float(args.lr)
+            for group, base in zip(optimizer.param_groups, group_base_lrs):
+                group["lr"] = base * schedule_factor
 
             batch = move_batch_to_device(batch, device)
             autocast_ctx = (

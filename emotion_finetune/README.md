@@ -56,6 +56,8 @@ wav2vec and renderer stay frozen.
 | `sanity_check.py` | bit-exactness proof (run before training) |
 | `preview_emotion.py` | offline 6-way render (neutral + 5 emotions) |
 | `evaluate_emotion_model.py` | quantitative evaluation |
+| `measure_emotion_effect.py` | diagnostic: emotion effect size on the motion latent vs scale |
+| `check_adapter.py` | diagnostic: inspect a trained adapter (norms, distinctiveness) |
 | `launch_emotion_live.py` | live-server wrapper (applies the adapter to the stock AH server) |
 | `generate_notebooks.py` | regenerates the two RunPod notebooks |
 | `tests/` | local CPU tests |
@@ -129,3 +131,56 @@ Neutral is preserved by construction **and** by training:
    during training (watch `val_anchor` stay near 0).
 3. `evaluate_emotion_model.py` measures the residual neutral drift after
    training (relative L2 should be near 0).
+
+## Emotion strength (cond scale)
+
+The emotion embedding enters the 512-dim conditioning as an additive term.
+Depending on the data, the magnitude the model settles on can be **too small to
+be visible** on the rendered face even though training metrics look correct
+(`margin` -> 0, distinct adapter weights). Two levers control the strength:
+
+- `--emotion_cond_scale` (training, default 1.0): multiplies the emotion
+  embedding during training and is **baked into the adapter config**, so
+  inference applies it automatically. Use e.g. `4` so the model learns a
+  natively stronger signal. Changing it changes the effective conditioning, so
+  **start a fresh `--exp_name`** rather than resuming a checkpoint trained with
+  a different value.
+- `--emotion_emb_lr_mult` (training, default 1.0): trains the small emotion
+  embedding with a higher LR than the LoRA (e.g. `10`), so it reaches a usable
+  magnitude faster.
+- `--emotion_scale` / `EMOTION_SCALE` (inference, default 1.0): an extra
+  on-the-fly multiplier, no retrain needed. Good for a quick check of whether
+  an already-trained adapter learned the right direction.
+
+## Troubleshooting: preview videos all look neutral
+
+If training converged (margin ~0) and `check_adapter.py` reports distinct,
+non-trivial weights, but the rendered emotions are invisible:
+
+1. **Measure the effect size** (no retraining):
+
+   ```bash
+   python emotion_finetune/measure_emotion_effect.py \
+       --dataset_path /workspace/emotion_generator_dataset \
+       --generator_path IMTalker/checkpoints/generator.ckpt \
+       --renderer_path IMTalker/checkpoints/renderer.ckpt \
+       --ref_path IMTalker/assets/3robert.jpeg \
+       --base_lora_path checkpoints/live_winner/lora/ditto_blink_lora_withaudio_r64_096_continue_2h_last.ckpt \
+       --emotion_adapter_path exps/emotion_lora_v1/emotion_adapter_final.ckpt \
+       --num_samples 4 --scales 1,2,4,8
+   ```
+
+   If the L2 distance from neutral is tiny at scale 1 but grows with scale, the
+   model learned the right **direction** and only the **magnitude** is small.
+
+2. **Quick confirmation**: re-render the preview with `--emotion_scale 2` (then
+   4). If emotions appear, the adapter is fine - it just needs amplification.
+
+3. **Robust fix**: retrain from a fresh `--exp_name` with
+   `--emotion_cond_scale 4 --emotion_emb_lr_mult 10` (the RunPod notebook
+   defaults). The learned emotion will be visible at inference scale 1.0.
+
+4. If even scale 8 shows nothing, the direction itself is wrong - check the
+   evaluation report's distinctiveness and the dataset separability line from
+   `verify_emotion_dataset.py` (the motion latents must actually carry the
+   expression).
